@@ -1,0 +1,4 @@
+package lattice
+
+func main() {
+}
