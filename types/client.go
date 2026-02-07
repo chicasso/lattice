@@ -23,6 +23,14 @@ const (
 	SendTimeout    = 3 * time.Second  /* Time before client message should be sent to the channel */
 )
 
+// TODO
+const (
+	JOINING = iota
+	READY
+	CLOSING
+	CLOSED
+)
+
 type Client struct {
 	//
 	// Client - Room related fields
@@ -255,9 +263,9 @@ func (c *Client) writeFrame(op ws.OpCode, payload []byte) error {
 func (c *Client) Close() {
 	c.closeOnce.Do(func() {
 		defer func() {
-			close(c.done)
 			close(c.Send)
 			close(c.SendRaw)
+			close(c.done)
 			c.Connection.Close()
 		}()
 

@@ -1,7 +1,7 @@
 package types
 
 type RoomState interface {
-	GetState() interface{}
-	ApplyPatch(patch interface{}) error
+	GetState() any
+	ApplyPatch(patch any) error
 	Clone() RoomState
 }
