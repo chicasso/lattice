@@ -5,6 +5,8 @@ import (
 )
 
 const (
+	PlayerJoined    = "player_joined"
+	PlayerLeft      = "player_left"
 	RoomJoined      = "room_joined"
 	RoomLeft        = "room_left"
 	RoomStateChange = "room_state_change"
@@ -17,11 +19,13 @@ const (
 	UnexpectedError      = 500
 	MessageTooLarge      = 4003
 	UnprocessableMessage = 4004
+	RateLimitExceeded    = 4005
 )
 
 type Message struct {
-	Type string          `json:"type"`
-	Data json.RawMessage `json:"data"`
+	SentBy string
+	Type   string          `json:"type"`
+	Data   json.RawMessage `json:"data"`
 }
 
 type ErrorMessage struct {
@@ -41,11 +45,13 @@ var (
 	ErrUnprocessableMessage = ErrorMessage{
 		Code:    UnprocessableMessage,
 		Message: "Message is malformed",
-		Reason:  "Message is malformed",
 	}
 	ErrUnexpected = ErrorMessage{
 		Code:    UnexpectedError,
 		Message: "Server error",
-		Reason:  "Server error",
+	}
+	ErrRateLimitExceeded = ErrorMessage{
+		Code:    RateLimitExceeded,
+		Message: "Ratelimit exceeded",
 	}
 )

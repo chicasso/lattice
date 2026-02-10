@@ -10,4 +10,5 @@ require (
 	github.com/gobwas/ws v1.4.0 // indirect
 	github.com/redis/go-redis/v9 v9.17.3 // indirect
 	golang.org/x/sys v0.6.0 // indirect
+	golang.org/x/time v0.14.0 // indirect
 )

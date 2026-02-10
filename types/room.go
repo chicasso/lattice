@@ -14,8 +14,9 @@ import (
 type RoomStatus uint8
 
 const (
-	DefaultTickRate       = 50 * time.Millisecond
-	DefaultMaxClients int = -1
+	DefaultTickRate            = 50 * time.Millisecond
+	DefaultMaxClients      int = -1
+	BroadcastChanBuffering int = 5
 )
 
 const (
@@ -35,30 +36,33 @@ type Room struct {
 	//
 	// Private properties
 	//
-	id              string
-	name            string
-	tickRate        time.Duration
-	autoDestroy     bool
-	metadata        map[string]any
-	status          RoomStatus
-	broadcastOnJoin bool
-	maxClients      int
-	locked          bool
-	createdAt       time.Time
+	id               string
+	name             string
+	tickRate         time.Duration
+	autoDestroy      bool
+	metadata         map[string]any
+	status           RoomStatus
+	broadcastOnJoin  bool
+	broadcastOnLeave bool
+	maxClients       int
+	locked           bool
+	createdAt        time.Time
 
 	//
 	// Channels
 	//
 	broadcast    chan BroadcastMessage
 	updateTicked chan time.Duration
+	SendMessage  chan Message
 
 	//
 	// Concurrency
 	//
-	wg     sync.WaitGroup
-	ctx    context.Context
-	mu     sync.RWMutex
-	cancel context.CancelFunc // TODO
+	wg          sync.WaitGroup
+	ctx         context.Context
+	mu          sync.RWMutex
+	cancel      context.CancelFunc // TODO
+	destroyOnce sync.Once
 
 	//
 	// Public properties
@@ -75,7 +79,7 @@ type Room struct {
 	// onMessage and subscribers
 	//
 	onMessageHandlers map[string]func(*Client, any)
-	// onPublishHandlers map[string]func(string)
+	// onPublishHandlers map[string]func(string) // TODO
 
 	//
 	// Lifecycle methods
@@ -103,8 +107,8 @@ func New() *Room {
 		State:             nil,
 		onMessageHandlers: make(map[string]func(*Client, any)),
 		createdAt:         time.Now(),
-		updateTicked:      make(chan time.Duration),
-		broadcast:         make(chan BroadcastMessage),
+		updateTicked:      make(chan time.Duration, 1),
+		broadcast:         make(chan BroadcastMessage, BroadcastChanBuffering),
 		status:            UN_INITIALIZED,
 	}
 }
@@ -138,6 +142,28 @@ func (r *Room) Run() error {
 			default:
 			}
 			ticker = time.NewTicker(updatedTickRate)
+
+		case msg, ok := <-r.SendMessage:
+			if !ok {
+				return nil
+			}
+
+			r.mu.RLock()
+			client, clientExists := r.Clients[msg.SentBy]
+			cb, cbExist := r.onMessageHandlers[msg.Type]
+			cbUnhandled, cbUnhandledExists := r.onMessageHandlers["*"]
+			r.mu.RLock()
+
+			if !clientExists {
+				continue
+			}
+			if cbExist {
+				cb(client, msg)
+			} else if !cbExist && cbUnhandledExists {
+				cbUnhandled(client, msg)
+			} else if !cbExist && !cbUnhandledExists {
+				fmt.Printf("Unhandled event %v\n", msg.Type)
+			}
 
 		case <-r.ctx.Done():
 			return nil
@@ -194,6 +220,18 @@ func (r *Room) DisableBroadcastJoin() {
 func (r *Room) EnableBroadcastJoin() {
 	r.mu.Lock()
 	r.broadcastOnJoin = true
+	r.mu.Unlock()
+}
+
+func (r *Room) DisableBroadcastLeave() {
+	r.mu.Lock()
+	r.broadcastOnLeave = false
+	r.mu.Unlock()
+}
+
+func (r *Room) EnableBroadcastLeave() {
+	r.mu.Lock()
+	r.broadcastOnLeave = true
 	r.mu.Unlock()
 }
 
@@ -347,11 +385,15 @@ func (r *Room) AddClient(client *Client) error {
 
 	r.Clients[client.SessionID] = client
 	client.Room = r
+
+	broadcastOnJoin := r.broadcastOnJoin
+	state := r.State
+
 	r.mu.Unlock()
 
-	if r.broadcastOnJoin {
+	if broadcastOnJoin {
 		r.Broadcast(
-			"player_joined", []string{client.SessionID},
+			PlayerJoined, []string{client.SessionID},
 			fmt.Sprintf("Client joined %v", client.SessionID),
 		)
 	}
@@ -360,8 +402,8 @@ func (r *Room) AddClient(client *Client) error {
 		r.OnJoin(client, authResp)
 	}
 
-	if r.State != nil {
-		client.SendMessage(RoomStateChange, r.State.GetState())
+	if state != nil {
+		client.Send(RoomStateChange, state.GetState())
 	}
 
 	return nil
@@ -410,11 +452,12 @@ func (r *Room) Destroy() error {
 		return err
 	}
 
-	r.cancel()
-	r.LockRoom()
-
-	close(r.broadcast)
-	close(r.updateTicked)
+	r.destroyOnce.Do(func() {
+		r.cancel()
+		r.LockRoom()
+		close(r.broadcast)
+		close(r.updateTicked)
+	})
 
 	r.mu.Lock()
 	for _, client := range r.Clients {
@@ -442,8 +485,15 @@ func (r *Room) RemoveClient(client *Client) error {
 
 	delete(r.Clients, client.SessionID)
 	clientCount := len(r.Clients)
-
+	broadcastOnLeave := r.broadcastOnLeave
 	r.mu.Unlock()
+
+	if broadcastOnLeave {
+		r.Broadcast(
+			PlayerLeft, []string{client.SessionID},
+			fmt.Sprintf("Client left %v", client.SessionID),
+		)
+	}
 
 	if r.OnLeave != nil {
 		r.OnLeave(client)
@@ -461,6 +511,10 @@ func (r *Room) OnMessage(topic string, handler func(*Client, any)) error {
 
 	if r.status == DESTROYED || r.status == DESTROYING {
 		return fmt.Errorf("room is in DESTROYED or DESTROYING state")
+	}
+
+	if handler == nil {
+		return fmt.Errorf("onMessage handler cannot be nil")
 	}
 
 	_, ok := r.onMessageHandlers[topic]
@@ -505,7 +559,7 @@ func (r *Room) broadcastHandler(msg BroadcastMessage) {
 
 	for _, client := range copy {
 		if !slices.Contains(msg.excludeClients, client.SessionID) {
-			client.SendMessage(msg.topic, msg.data)
+			client.Send(msg.topic, msg.data)
 		}
 	}
 
@@ -534,3 +588,7 @@ func (r *Room) onTick() {}
 // 	r.RedisConnector.Subscribe(topic, cb)
 // }
 //
+
+// TODO: leave code to OnLeave
+// TODO: send client option to OnJoin
+// TODO: add option field to client
