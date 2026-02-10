@@ -129,6 +129,15 @@ func NewClient(sessionID string, conn net.Conn) *Client {
 	return client
 }
 
+func NewClientWithContext(ctx context.Context, sessionID string, conn net.Conn) *Client {
+	ctx, cancel := context.WithCancel(ctx)
+	client := NewClient(sessionID, conn)
+	client.cancel = cancel
+	client.ctx = ctx
+
+	return client
+}
+
 func (c *Client) GetStatus() ClientStatus {
 	return ClientStatus(c.status.Load())
 }
