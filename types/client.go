@@ -79,7 +79,8 @@ type Client struct {
 	//
 	// Room
 	//
-	Room *Room
+	Room   *Room
+	server *Server
 
 	//
 	// Concurrency & Context
@@ -106,8 +107,12 @@ type Client struct {
 }
 
 func NewClient(sessionID string, conn net.Conn) *Client {
+	return NewClientWithContext(context.Background(), sessionID, conn)
+}
+
+func NewClientWithContext(ctx context.Context, sessionID string, conn net.Conn) *Client {
 	now := time.Now()
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(ctx)
 
 	client := &Client{
 		SessionID:   sessionID,
@@ -126,15 +131,6 @@ func NewClient(sessionID string, conn net.Conn) *Client {
 
 	client.status.Store(int32(JOINING))
 	client.lastMessageAt.Store(now.Unix())
-	return client
-}
-
-func NewClientWithContext(ctx context.Context, sessionID string, conn net.Conn) *Client {
-	ctx, cancel := context.WithCancel(ctx)
-	client := NewClient(sessionID, conn)
-	client.cancel = cancel
-	client.ctx = ctx
-
 	return client
 }
 
@@ -197,6 +193,7 @@ func (c *Client) ReadPump() {
 
 	for {
 		now := time.Now()
+		limitedReader.N = maxMessageSize
 
 		select {
 		case <-c.ctx.Done():
@@ -254,7 +251,29 @@ func (c *Client) ReadPump() {
 
 			c.messagesReceived.Add(1)
 
+			if message.Type == JoinRoomById && c.Room == nil {
+				var jsonData map[string]interface{}
+				if err = json.Unmarshal(message.Data, &jsonData); err != nil {
+					log.Printf("error unmarshaling join payload: %v", err)
+					continue
+				}
+
+				roomId, _ := jsonData["roomId"].(string)
+				if roomId == "" {
+					log.Printf("client %s sent join_room_by_id with no roomId", c.SessionID)
+					c.Send(Error, ErrUnprocessableMessage)
+					continue
+				}
+
+				if err := c.server.JoinRoomById(c, roomId); err != nil {
+					log.Printf("client %s failed to join room %s: %v", c.SessionID, roomId, err)
+					c.Send(Error, ErrUnprocessableMessage)
+				}
+				continue
+			}
+
 			if c.Room != nil {
+				message.SentBy = c.SessionID
 				c.Room.SendMessage <- message
 			}
 

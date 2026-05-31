@@ -13,6 +13,7 @@ const (
 	StatePatch      = "state_patch"
 	Action          = "action"
 	Error           = "error"
+	JoinRoomById    = "join_room_by_id"
 )
 
 const (
@@ -23,7 +24,7 @@ const (
 )
 
 type Message struct {
-	SentBy string
+	SentBy string          `json:"-"`
 	Type   string          `json:"type"`
 	Data   json.RawMessage `json:"data"`
 }

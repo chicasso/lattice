@@ -101,6 +101,8 @@ func (s *Server) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	sessionID := utils.RandomUUID()
 
 	client := NewClientWithContext(s.ctx, sessionID, conn)
+	client.server = s
+
 	log.Printf("New connection: %s (total: %d)", sessionID, s.activeConnections.Load())
 
 	s.wg.Add(1)
@@ -114,10 +116,9 @@ func (s *Server) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	s.wg.Add(1)
-	defer func() {
+	go func() {
 		defer s.wg.Done()
-
-		go client.ReadPump()
+		client.ReadPump()
 	}()
 }
 
@@ -195,34 +196,29 @@ func (s *Server) HandleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
 	if err := json.NewEncoder(w).Encode(health); err != nil {
 		log.Printf("Error encoding health response: %v", err)
 	}
-	w.WriteHeader(statusCode)
 }
 
-// TODO
-func (s *Server) JoinRoomById(w http.ResponseWriter, r *http.Request) {
-	// roomId := r.PathValue("roomId")
-	// _room, exists := s.GetRoomByID(roomId)
-	// if !exists {
-	// 	w.WriteHeader(http.StatusNotFound)
-	// 	w.Header().Set("Content-Type", "application/json")
-	// 	if err := json.NewEncoder(w).Encode(map[string]any{}); err != nil {
-	// 		log.Printf("Error encoding health response: %v", err)
-	// 	}
-	// 	return
-	// }
-	//
-	// TODO
-	// room.AddClient() // client object
+func (s *Server) JoinRoomById(client *Client, roomId string) error {
+	room, exists := s.GetRoomByID(roomId)
+	if !exists {
+		return fmt.Errorf("Room does not exists")
+	}
+	if client == nil {
+		return fmt.Errorf("<nil> Client")
+	}
+
+	room.AddClient(client)
+	return nil
 }
 
 func (s *Server) Listen(addr string, config ServerConfig) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /ws", s.HandleWebSocket)
 	mux.HandleFunc("GET /health", s.HandleHealth)
-	mux.HandleFunc("GET /join-room-by-roomId/{roomId}", s.JoinRoomById)
 
 	s.httpServer = &http.Server{
 		Addr:         addr,
@@ -256,28 +252,34 @@ func (s *Server) CreateRoom(roomType string) (*Room, error) {
 	room := factory()
 	roomDefaultId := fmt.Sprintf("%v#%v", roomType, utils.RandomUUID())
 	room.SetId(roomDefaultId)
+	room.serverRemoveFunc = func(roomID string) {
+		s.mu.Lock()
+		delete(s.rooms, roomID)
+		s.mu.Unlock()
+		log.Printf("Room auto-removed: %s", roomID)
+	}
 	s.rooms[roomDefaultId] = room
 	s.mu.Unlock()
 
-	log.Printf("Room created: %s", roomType)
+	log.Printf("Room created of type '%v' with roomId '%v'", roomType, roomDefaultId)
 	go room.Run()
 
 	return room, nil
 }
 
 func (s *Server) RemoveRoom(name string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
+	s.mu.RLock()
 	room, exists := s.rooms[name]
-	if exists {
-		if err := room.Destroy(); err != nil {
-			fmt.Printf("%v\n", err.Error())
-		} else {
-			delete(s.rooms, name)
-			log.Printf("Room removed: %s", name)
-		}
+	s.mu.RUnlock()
+
+	if !exists {
+		return
 	}
+
+	if err := room.Destroy(); err != nil {
+		log.Printf("RemoveRoom: %v", err)
+	}
+	// serverRemoveFunc set on the room handles deletion from s.rooms
 }
 
 func (s *Server) GetRoomByID(roomId string) (*Room, bool) {

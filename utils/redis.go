@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"time"
 
-	"crypto/tls"
-
 	"github.com/redis/go-redis/v9"
 )
 
@@ -26,12 +24,12 @@ type RClient struct {
 	ctx context.Context
 }
 
-func (redis *RClient) get(key string) *redis.StringCmd {
-	return redis.rdb.Get(redis.ctx, key)
+func (r *RClient) get(key string) *redis.StringCmd {
+	return r.rdb.Get(r.ctx, key)
 }
 
-func (redis *RClient) set(key string, value any, exp time.Duration) *redis.StatusCmd {
-	return redis.rdb.Set(redis.ctx, key, value, exp)
+func (r *RClient) set(key string, value any, exp time.Duration) *redis.StatusCmd {
+	return r.rdb.Set(r.ctx, key, value, exp)
 }
 
 func (r *RClient) publish(topic string, msg any) *redis.IntCmd {
@@ -64,40 +62,31 @@ func (r *RClient) Subscribe(topic string, cb func(string)) {
 	}()
 }
 
-func New(_url string) RClient {
-	//
-	// opt, err := redis.ParseURL(url)
-	// if err != nil {
-	// 	panic(err)
-	// }
-	//
-	return RClient{
-		rdb: redis.NewClient(
-			&redis.Options{
-				Network:    "tcp",
-				Addr:       "localhost:6379",
-				ClientName: "lattice",
-				OnConnect: func(ctx context.Context, cn *redis.Conn) error {
-					fmt.Println("redis connection established")
-					return nil
-				},
-				Username:        "",
-				Password:        "",
-				MaxRetries:      3,
-				MinRetryBackoff: -1, // sec
-				MaxRetryBackoff: -1, // sec
-				ReadTimeout:     10, // sec
-				WriteTimeout:    10, // sec
-				MinIdleConns:    1,
-				MaxIdleConns:    10,
-				MaxActiveConns:  0,
-				ConnMaxIdleTime: 30, // min
-				ConnMaxLifetime: 0,
-				TLSConfig:       &tls.Config{},
-			},
-		),
-		ctx: context.Background(),
+// New creates a Redis client from a Redis URL (e.g. "redis://user:pass@localhost:6379/0").
+func New(url string) (RClient, error) {
+	opt, err := redis.ParseURL(url)
+	if err != nil {
+		return RClient{}, fmt.Errorf("invalid redis URL: %w", err)
 	}
+
+	opt.ClientName = "lattice"
+	opt.OnConnect = func(ctx context.Context, cn *redis.Conn) error {
+		fmt.Println("redis connection established")
+		return nil
+	}
+	opt.MaxRetries = 3
+	opt.MinRetryBackoff = 100 * time.Millisecond
+	opt.MaxRetryBackoff = 1 * time.Second
+	opt.ReadTimeout = 10 * time.Second
+	opt.WriteTimeout = 10 * time.Second
+	opt.MinIdleConns = 1
+	opt.MaxIdleConns = 10
+	opt.ConnMaxIdleTime = 30 * time.Minute
+
+	return RClient{
+		rdb: redis.NewClient(opt),
+		ctx: context.Background(),
+	}, nil
 }
 
 func Get[T rTypes](r *RClient, key string) (T, error) {

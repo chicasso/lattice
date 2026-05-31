@@ -16,7 +16,7 @@ type RoomStatus uint8
 const (
 	DefaultTickRate            = 50 * time.Millisecond
 	DefaultMaxClients      int = -1
-	BroadcastChanBuffering int = 5
+	BroadcastChanBuffering int = 256
 )
 
 const (
@@ -61,14 +61,25 @@ type Room struct {
 	wg          sync.WaitGroup
 	ctx         context.Context
 	mu          sync.RWMutex
-	cancel      context.CancelFunc // TODO
+	cancel      context.CancelFunc
 	destroyOnce sync.Once
+
+	//
+	// Tick tracking
+	//
+	lastTickTime time.Time
+
+	//
+	// Internal server hook — called when room is fully destroyed so the server
+	// can remove it from its room map (used by autoDestroy).
+	//
+	serverRemoveFunc func(roomID string)
 
 	//
 	// Public properties
 	//
 	State   RoomState
-	Clients map[string]*Client
+	clients map[string]*Client
 
 	//
 	// Redis
@@ -78,7 +89,7 @@ type Room struct {
 	//
 	// onMessage and subscribers
 	//
-	onMessageHandlers map[string]func(*Client, any)
+	onMessageHandlers map[string]func(*Client, Message)
 	// onPublishHandlers map[string]func(string) // TODO
 
 	//
@@ -88,6 +99,7 @@ type Room struct {
 	OnAuth        func(*Client) (any, error)
 	OnJoin        func(*Client, any)
 	OnLeave       func(*Client)
+	OnTick        func(delta time.Duration)
 	OnStateChange func(*Room, any) error
 	OnDestroy     func()
 }
@@ -103,12 +115,14 @@ func New() *Room {
 		cancel:            cancel,
 		maxClients:        DefaultMaxClients,
 		locked:            false,
-		Clients:           make(map[string]*Client),
+		clients:           make(map[string]*Client),
 		State:             nil,
-		onMessageHandlers: make(map[string]func(*Client, any)),
+		onMessageHandlers: make(map[string]func(*Client, Message)),
 		createdAt:         time.Now(),
+		lastTickTime:      time.Now(),
 		updateTicked:      make(chan time.Duration, 1),
 		broadcast:         make(chan BroadcastMessage, BroadcastChanBuffering),
+		SendMessage:       make(chan Message, 256),
 		status:            UN_INITIALIZED,
 	}
 }
@@ -149,10 +163,10 @@ func (r *Room) Run() error {
 			}
 
 			r.mu.RLock()
-			client, clientExists := r.Clients[msg.SentBy]
+			client, clientExists := r.clients[msg.SentBy]
 			cb, cbExist := r.onMessageHandlers[msg.Type]
 			cbUnhandled, cbUnhandledExists := r.onMessageHandlers["*"]
-			r.mu.RLock()
+			r.mu.RUnlock()
 
 			if !clientExists {
 				continue
@@ -181,8 +195,8 @@ func (r *Room) LockRoom() bool {
 }
 
 func (r *Room) SetMaxClients(max int) error {
-	if max <= 0 {
-		return fmt.Errorf("invalid maxClients provided")
+	if max == 0 || max < DefaultMaxClients {
+		return fmt.Errorf("invalid maxClients: use -1 for unlimited or a positive value")
 	}
 	if count := r.GetClientCount(); count > max {
 		return fmt.Errorf("room already contains more clients than provided value")
@@ -348,7 +362,7 @@ func (r *Room) GetAutoDestroy() bool {
 
 func (r *Room) GetClientCount() int {
 	r.mu.RLock()
-	count := len(r.Clients)
+	count := len(r.clients)
 	r.mu.RUnlock()
 
 	return count
@@ -378,12 +392,12 @@ func (r *Room) AddClient(client *Client) error {
 		return fmt.Errorf("room is locked")
 	}
 
-	if r.maxClients != DefaultMaxClients && len(r.Clients) >= r.maxClients {
+	if r.maxClients != DefaultMaxClients && len(r.clients) >= r.maxClients {
 		r.mu.Unlock()
 		return fmt.Errorf("room is full")
 	}
 
-	r.Clients[client.SessionID] = client
+	r.clients[client.SessionID] = client
 	client.Room = r
 
 	broadcastOnJoin := r.broadcastOnJoin
@@ -397,6 +411,11 @@ func (r *Room) AddClient(client *Client) error {
 			fmt.Sprintf("Client joined %v", client.SessionID),
 		)
 	}
+
+	client.Send(RoomJoined, map[string]any{
+		"roomId": r.GetId(),
+		"name":   r.GetName(),
+	})
 
 	if r.OnJoin != nil {
 		r.OnJoin(client, authResp)
@@ -443,13 +462,8 @@ func (r *Room) setRoomStatus(newStatus RoomStatus) error {
 }
 
 func (r *Room) Destroy() error {
-	status := r.GetRoomStatus()
-	if status == DESTROYED || status == DESTROYING {
-		return fmt.Errorf("room already shutting down")
-	}
-
 	if err := r.setRoomStatus(DESTROYING); err != nil {
-		return err
+		return fmt.Errorf("room already shutting down or not started: %w", err)
 	}
 
 	r.destroyOnce.Do(func() {
@@ -460,10 +474,10 @@ func (r *Room) Destroy() error {
 	})
 
 	r.mu.Lock()
-	for _, client := range r.Clients {
+	for _, client := range r.clients {
 		client.Close()
 	}
-	r.Clients = make(map[string]*Client)
+	r.clients = make(map[string]*Client)
 	r.mu.Unlock()
 
 	if r.OnDestroy != nil {
@@ -472,19 +486,23 @@ func (r *Room) Destroy() error {
 
 	r.setRoomStatus(DESTROYED)
 
+	if r.serverRemoveFunc != nil {
+		r.serverRemoveFunc(r.GetId())
+	}
+
 	return nil
 }
 
 func (r *Room) RemoveClient(client *Client) error {
 	r.mu.Lock()
 
-	if _, has := r.Clients[client.SessionID]; !has {
+	if _, has := r.clients[client.SessionID]; !has {
 		r.mu.Unlock()
 		return fmt.Errorf("client not found")
 	}
 
-	delete(r.Clients, client.SessionID)
-	clientCount := len(r.Clients)
+	delete(r.clients, client.SessionID)
+	clientCount := len(r.clients)
 	broadcastOnLeave := r.broadcastOnLeave
 	r.mu.Unlock()
 
@@ -505,7 +523,7 @@ func (r *Room) RemoveClient(client *Client) error {
 	return nil
 }
 
-func (r *Room) OnMessage(topic string, handler func(*Client, any)) error {
+func (r *Room) OnMessage(topic string, handler func(*Client, Message)) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -524,6 +542,10 @@ func (r *Room) OnMessage(topic string, handler func(*Client, any)) error {
 
 	r.onMessageHandlers[topic] = handler
 	return nil
+}
+
+func (r *Room) BroadcastAll(topic string, data any) error {
+	return r.Broadcast(topic, nil, data)
 }
 
 func (r *Room) Broadcast(topic string, exclude []string, data any) error {
@@ -551,8 +573,8 @@ func (r *Room) broadcastHandler(msg BroadcastMessage) {
 	fmt.Printf("topic=%v, data=%v, sender=%v\n", msg.topic, msg.data, msg.excludeClients)
 
 	r.mu.RLock()
-	copy := make([]*Client, 0, len(r.Clients))
-	for _, client := range r.Clients {
+	copy := make([]*Client, 0, len(r.clients))
+	for _, client := range r.clients {
 		copy = append(copy, client)
 	}
 	r.mu.RUnlock()
@@ -565,8 +587,25 @@ func (r *Room) broadcastHandler(msg BroadcastMessage) {
 
 }
 
-// TODO
-func (r *Room) onTick() {}
+func (r *Room) GetClients() []*Client {
+	r.mu.RLock()
+	out := make([]*Client, 0, len(r.clients))
+	for _, c := range r.clients {
+		out = append(out, c)
+	}
+	r.mu.RUnlock()
+	return out
+}
+
+func (r *Room) onTick() {
+	now := time.Now()
+	delta := now.Sub(r.lastTickTime)
+	r.lastTickTime = now
+
+	if r.OnTick != nil {
+		r.OnTick(delta)
+	}
+}
 
 //
 // TODO
