@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/chicasso/lattice/types"
+	"github.com/ohhcgan/lattice/types"
 )
 
 func main() {

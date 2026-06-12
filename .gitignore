@@ -2,3 +2,5 @@
 .env
 .claude
 client.html
+.gitmodules
+.vscode

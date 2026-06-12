@@ -1,0 +1,24 @@
+{
+  "projectName": "lattice",
+  "projectOwner": "ohhcgan",
+  "files": [
+    "README.md"
+  ],
+  "imageSize": 100,
+  "commit": false,
+  "contributorsSortAlphabetically": true,
+  "contributors": [
+    {
+      "login": "ohhcgan",
+      "name": "Chirag Gandherva",
+      "avatar_url": "https://avatars.githubusercontent.com/u/209220228?s=96&v=4",
+      "profile": "https://avatars.githubusercontent.com/u/209220228?s=96&v=4",
+      "contributions": [
+        "code",
+        "doc",
+        "example"
+      ]
+    }
+  ],
+  "repoType": "github"
+}

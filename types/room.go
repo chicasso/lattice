@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/chicasso/lattice/utils"
+	"github.com/ohhcgan/lattice/utils"
 )
 
 type RoomStatus uint8

@@ -1,4 +1,4 @@
-module github.com/chicasso/lattice
+module github.com/ohhcgan/lattice
 
 go 1.25.5
 

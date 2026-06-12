@@ -10,8 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/chicasso/lattice/utils"
 	"github.com/gobwas/ws"
+	"github.com/ohhcgan/lattice/utils"
 	"golang.org/x/time/rate"
 )
 
